@@ -52,6 +52,31 @@ struct ServerTests {
 
             try await client.setPermissions(0o600, at: "\(root)/sub/moved.bin")
             #expect(try await client.attributes(of: "\(root)/sub/moved.bin").mode & 0o777 == 0o600)
+
+            // Bytes that are not UTF-8 ("caf\xE9" in Latin-1) survive a listing and come back
+            // as the same name.
+            let latin1 = NFSName.string(from: [0x63, 0x61, 0x66, 0xE9])
+            try await client.write(Data("latin1".utf8), to: "\(root)/\(latin1)", mode: .guarded)
+            #expect(try await client.contentsOfDirectory(at: root).map(\.name).contains(latin1))
+            #expect(try await client.read("\(root)/\(latin1)") == Data("latin1".utf8))
+
+            // Copies: a tree with a file, a symlink and its permission bits; not onto
+            // something that exists, nor into itself.
+            try await client.createSymbolicLink(at: "\(root)/sub/link", withDestination: "moved.bin")
+            try await client.copyItem(at: "\(root)/sub", to: "\(root)/sub-copy")
+            #expect(try await client.destinationOfSymbolicLink(at: "\(root)/sub-copy/link") == "moved.bin")
+            #expect(try await client.read("\(root)/sub-copy/moved.bin") == Data("short".utf8))
+            #expect(try await client.attributes(of: "\(root)/sub-copy/moved.bin").mode & 0o777 == 0o600)
+            await #expect(throws: NFSClientError.alreadyExists(path: "\(root)/sub-copy")) {
+                try await client.copyItem(at: "\(root)/sub", to: "\(root)/sub-copy")
+            }
+            await #expect(throws: NFSClientError.invalidPath("\(root)/sub/inner")) {
+                try await client.copyItem(at: "\(root)/sub", to: "\(root)/sub/inner")
+            }
+            let large = Data((0..<2_500_000).map { UInt8(truncatingIfNeeded: $0 &* 7) })
+            try await client.write(large, to: "\(root)/large.bin")
+            try await client.copyItem(at: "\(root)/large.bin", to: "\(root)/large-copy.bin")
+            #expect(try await client.read("\(root)/large-copy.bin") == large)
         } catch {
             try? await client.removeItem(at: root)
             await client.disconnect()

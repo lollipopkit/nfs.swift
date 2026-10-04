@@ -19,7 +19,7 @@ import Testing
     #expect(try decoder.decodeUInt32() == 7)
     #expect(try decoder.decodeUInt64() == 0x0102_0304_0506_0708)
     #expect(try decoder.decodeBool())
-    #expect(try decoder.decodeString() == "abcde")
+    #expect(try decoder.decodeOpaque() == Array("abcde".utf8))
     #expect(try decoder.decodeFixedOpaque(length: 3) == [1, 2, 3])
     #expect(decoder.isAtEnd)
 }
@@ -96,4 +96,23 @@ private func reply(_ words: [UInt32]) -> [UInt8] {
     #expect(try NFSClient.split("a").name == "a")
     #expect(throws: NFSClientError.self) { try NFSClient.split("/") }
     #expect(throws: NFSClientError.self) { try NFSClient.split("/a/..") }
+}
+
+@Test func namesRoundTripLosslessly() {
+    let samples: [[UInt8]] = [
+        Array("plain.txt".utf8),
+        Array("测试 文件 ✓.txt".utf8),
+        [0x63, 0x61, 0x66, 0xE9],                       // "café" in Latin-1
+        [0xC4, 0xE3, 0xBA, 0xC3],                       // "你好" in GBK
+        [0xC0, 0xAF],                                   // overlong "/"
+        [0xED, 0xA0, 0x80],                             // a UTF-16 surrogate
+        [0xF4, 0x90, 0x80, 0x80],                       // above U+10FFFF
+        [0xE2, 0x82],                                   // truncated sequence
+        Array("\u{10FE41}".utf8)                        // a code point from the escape range
+    ]
+    for bytes in samples {
+        #expect(NFSName.bytes(from: NFSName.string(from: bytes)) == bytes)
+    }
+    #expect(NFSName.string(from: Array("测试.txt".utf8)) == "测试.txt")
+    #expect(NFSName.string(from: [0x61, 0xFF]) == "a\u{10FEFF}")
 }

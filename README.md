@@ -3,7 +3,8 @@
 An NFSv3 client in Swift, built on SwiftNIO. It speaks ONC RPC over TCP directly, so it needs no kernel mount, no `mount_nfs` and no root, and works inside an app sandbox.
 
 - NFSv3 (RFC 1813) with the MOUNT and portmapper protocols; `AUTH_SYS` credentials
-- Path-based `NFSClient`: list, stat, read (whole or ranged), write, create, mkdir, remove (recursive), rename, chmod, readlink
+- Path-based `NFSClient`: list, stat, read (whole or ranged), write, create, mkdir, remove (recursive), rename, copy (recursive), chmod, symlinks
+- File names that are not UTF-8 (Latin-1, GBK, …) are kept: each such byte maps to one code point in U+10FE00–U+10FEFF and back (`NFSName`)
 - Writes go out as unstable WRITEs plus one COMMIT, and are redone when the server's write verifier shows it restarted in between
 - File handles are cached and looked up again when the server reports them stale
 - `NFS3Client` exposes the individual procedures for anything `NFSClient` does not cover
@@ -47,6 +48,8 @@ await client.disconnect()
 ```
 
 Paths are relative to the export's root. Errors are `NFSClientError`, or `RPCError` for transport failures.
+
+NFSv3 has no server-side copy, so `copyItem` reads the data and writes it back through the client.
 
 ## Server requirements
 

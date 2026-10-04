@@ -198,6 +198,16 @@ public actor NFSClient {
         }
     }
 
+    /// Creates a symbolic link at `path` pointing to `destination`, which the server
+    /// stores as given.
+    public func createSymbolicLink(at path: String, withDestination destination: String) async throws {
+        let (parent, name) = try Self.split(path)
+        try await perform(on: path) { session in
+            let directory = try await self.handle(for: parent, in: session)
+            try await session.nfs.symlink(name, in: directory, target: destination)
+        }
+    }
+
     /// Removes a file, or a directory with everything in it.
     public func removeItem(at path: String) async throws {
         _ = try Self.split(path)
@@ -223,6 +233,24 @@ public actor NFSClient {
             try await session.nfs.rename(sourceName, in: from, to: destinationName, in: to)
             self.forgetHandles(under: source)
             self.forgetHandles(under: destination)
+        }
+    }
+
+    /// Copies a file, symbolic link or directory tree, with its permission bits.
+    ///
+    /// NFSv3 has no server-side copy, so file data passes through the client one transfer
+    /// at a time. An existing destination fails with `.alreadyExists`, and so does a copy
+    /// of a directory into itself, with `.invalidPath`.
+    public func copyItem(at source: String, to destination: String) async throws {
+        _ = try Self.split(source)
+        _ = try Self.split(destination)
+        let sourceKey = Self.key(source)
+        let destinationKey = Self.key(destination)
+        guard destinationKey != sourceKey, !destinationKey.hasPrefix(sourceKey + "/") else {
+            throw NFSClientError.invalidPath(destination)
+        }
+        try await perform(on: source) { session in
+            try await self.copyRecursively(source, to: destination, in: session)
         }
     }
 
@@ -299,6 +327,73 @@ public actor NFSClient {
             try await session.nfs.remove(name, in: directory)
         }
         forgetHandles(under: path)
+    }
+
+    private func copyRecursively(_ source: String, to destination: String, in session: Session) async throws {
+        let (parent, name) = try Self.split(destination)
+        let sourceHandle = try await handle(for: source, in: session)
+        let attributes = try await session.nfs.getattr(sourceHandle)
+        let directory = try await handle(for: parent, in: session)
+
+        // Failures here are about the destination, which `perform` cannot tell.
+        func creating<T>(_ body: () async throws -> T) async throws -> T {
+            do {
+                return try await body()
+            } catch let error as NFSStatusError {
+                throw NFSClientError(status: error, path: destination)
+            }
+        }
+
+        switch attributes.type {
+        case .directory:
+            try await creating { try await session.nfs.mkdir(name, in: directory) }
+            for entry in try await entries(of: sourceHandle, in: session) {
+                try await copyRecursively(Self.joined(source, entry.name), to: Self.joined(destination, entry.name), in: session)
+            }
+        case .symlink:
+            let target = try await session.nfs.readlink(sourceHandle)
+            try await creating { try await session.nfs.symlink(name, in: directory, target: target) }
+            return
+        case .regular:
+            let copy = try await creating { try await session.nfs.create(name, in: directory, mode: .guarded) }
+            handles[Self.key(destination)] = copy
+            var completed = false
+            for _ in 0..<3 where !completed {
+                completed = try await Self.copyData(from: sourceHandle, to: copy, in: session)
+            }
+            guard completed else { throw NFSClientError.serverKeptRestarting(path: destination) }
+        default:
+            throw NFSClientError.unsupportedFileType(path: source)
+        }
+        // Last, so a read-only directory is still writable while it is filled.
+        let copied = try await handle(for: destination, in: session)
+        try await session.nfs.setMode(attributes.mode & 0o7777, of: copied)
+    }
+
+    /// Whether the whole file is durable under one write verifier.
+    private static func copyData(from source: NFSFileHandle, to destination: NFSFileHandle, in session: Session) async throws -> Bool {
+        var verifier: [UInt8]?
+        var offset: UInt64 = 0
+        while true {
+            let chunk = try await session.nfs.read(source, offset: offset, count: session.readSize)
+            var written = 0
+            while written < chunk.data.count {
+                let size = min(chunk.data.count - written, Int(session.writeSize))
+                let result = try await session.nfs.write(
+                    destination,
+                    offset: offset + UInt64(written),
+                    data: chunk.data[written..<(written + size)]
+                )
+                guard result.count != 0 else { throw NFSClientError.serverAcceptedNoData }
+                if let verifier, verifier != result.verifier { return false }
+                verifier = result.verifier
+                written += Int(result.count)
+            }
+            offset += UInt64(chunk.data.count)
+            if chunk.eof || chunk.data.isEmpty { break }
+        }
+        guard let verifier else { return true }
+        return try await session.nfs.commit(destination) == verifier
     }
 
     /// Whether everything written is durable under one write verifier.
@@ -421,6 +516,8 @@ public enum NFSClientError: Error, Equatable, LocalizedError {
     case serverKeptRestarting(path: String)
     case serverAcceptedNoData
     case sourceEndedEarly
+    /// Devices, sockets and FIFOs cannot be copied.
+    case unsupportedFileType(path: String)
 
     init(status: NFSStatusError, path: String) {
         switch status.status {
@@ -463,6 +560,7 @@ public enum NFSClientError: Error, Equatable, LocalizedError {
         case .serverKeptRestarting(let path): return "The NFS server kept restarting while \(path) was written"
         case .serverAcceptedNoData: return "The NFS server accepted no data"
         case .sourceEndedEarly: return "The upload source ended before its stated size"
+        case .unsupportedFileType(let path): return "\(path) is a device, socket or FIFO, which cannot be copied"
         }
     }
 }
