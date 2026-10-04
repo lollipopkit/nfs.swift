@@ -229,9 +229,10 @@ public struct NFS3Client: Sendable {
         }
         try reply.decodeStatus()
         _ = try reply.decodeOptionalAttributes()
-        _ = try reply.decodeUInt32()                     // count
+        let declared = try reply.decodeUInt32()
         let eof = try reply.decodeBool()
         let data = try reply.decodeOpaque(maxLength: Int(count))
+        guard declared == data.count else { throw RPCError.malformedReply }
         return (data, eof)
     }
 
@@ -329,6 +330,7 @@ public struct NFS3Client: Sendable {
     public func readdirplus(_ directory: NFSFileHandle, maxReplySize: UInt32) async throws -> [NFSDirectoryEntry] {
         var entries: [NFSDirectoryEntry] = []
         var cookie: UInt64 = 0
+        var requestedCookies: Set<UInt64> = []
         var cookieVerifier = [UInt8](repeating: 0, count: 8)
         while true {
             var reply = try await call(.readdirplus, idempotent: true) {
@@ -341,9 +343,8 @@ public struct NFS3Client: Sendable {
             try reply.decodeStatus()
             _ = try reply.decodeOptionalAttributes()
             cookieVerifier = try reply.decodeFixedOpaque(length: 8)
-            var sawEntry = false
+            requestedCookies.insert(cookie)
             while try reply.decodeBool() {
-                sawEntry = true
                 _ = try reply.decodeUInt64()             // fileid
                 let name = NFSName.string(from: try reply.decodeOpaque(maxLength: 255))
                 cookie = try reply.decodeUInt64()
@@ -354,8 +355,9 @@ public struct NFS3Client: Sendable {
                 }
             }
             if try reply.decodeBool() { return entries }
-            // A page without entries that is not the last one would loop forever.
-            guard sawEntry else { throw RPCError.malformedReply }
+            // A page that is not the last must move to a cookie not asked for yet; one that
+            // stays put or circles back would be requested forever.
+            guard !requestedCookies.contains(cookie) else { throw RPCError.malformedReply }
         }
     }
 
@@ -363,6 +365,7 @@ public struct NFS3Client: Sendable {
     public func readdir(_ directory: NFSFileHandle, maxReplySize: UInt32) async throws -> [String] {
         var names: [String] = []
         var cookie: UInt64 = 0
+        var requestedCookies: Set<UInt64> = []
         var cookieVerifier = [UInt8](repeating: 0, count: 8)
         while true {
             var reply = try await call(.readdir, idempotent: true) {
@@ -374,9 +377,8 @@ public struct NFS3Client: Sendable {
             try reply.decodeStatus()
             _ = try reply.decodeOptionalAttributes()
             cookieVerifier = try reply.decodeFixedOpaque(length: 8)
-            var sawEntry = false
+            requestedCookies.insert(cookie)
             while try reply.decodeBool() {
-                sawEntry = true
                 _ = try reply.decodeUInt64()             // fileid
                 let name = NFSName.string(from: try reply.decodeOpaque(maxLength: 255))
                 cookie = try reply.decodeUInt64()
@@ -385,7 +387,9 @@ public struct NFS3Client: Sendable {
                 }
             }
             if try reply.decodeBool() { return names }
-            guard sawEntry else { throw RPCError.malformedReply }
+            // A page that is not the last must move to a cookie not asked for yet; one that
+            // stays put or circles back would be requested forever.
+            guard !requestedCookies.contains(cookie) else { throw RPCError.malformedReply }
         }
     }
 
