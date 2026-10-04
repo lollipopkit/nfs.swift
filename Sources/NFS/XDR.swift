@@ -83,13 +83,6 @@ struct XDRDecoder {
         defer { offset += padded }
         return Array(bytes[offset..<(offset + length)])
     }
-
-    mutating func decodeString(maxLength: Int = .max) throws -> String {
-        let raw = try decodeOpaque(maxLength: maxLength)
-        // File names are bytes on the server; one that is not UTF-8 is shown with
-        // replacement characters rather than failing the whole listing.
-        return String(decoding: raw, as: UTF8.self)
-    }
 }
 
 enum XDRError: Error, Equatable {
