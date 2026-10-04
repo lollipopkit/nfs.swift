@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: swift test
+
+  # The server tests need a kernel NFS server, which runs on the runner itself; Swift runs
+  # in a container sharing its network.
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Start an NFS server
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nfs-kernel-server
+          sudo install -d -o "$(id -u)" -g "$(id -g)" /srv/nfs
+          echo "/srv/nfs 127.0.0.1(rw,sync,insecure,no_subtree_check)" | sudo tee /etc/exports
+          sudo exportfs -ra
+          sudo systemctl restart nfs-server
+      - name: Test
+        run: |
+          docker run --rm --network host -v "$PWD:/src" -w /src \
+            -e NFS_TEST_HOST=127.0.0.1 -e NFS_TEST_EXPORT=/srv/nfs \
+            -e NFS_TEST_UID="$(id -u)" -e NFS_TEST_GID="$(id -g)" \
+            swift:6.4-noble swift test
